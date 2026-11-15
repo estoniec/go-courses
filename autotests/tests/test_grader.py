@@ -1,10 +1,16 @@
-"""End-to-end checks: correct solutions pass and meaningful defects fail."""
+"""Grader reports and rejection checks without complete student solutions."""
 import json
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-import shutil
+import contextlib
+import io
+import sys
+from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+import check
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -21,41 +27,38 @@ class GraderTests(unittest.TestCase):
             self.assertEqual(data["status"], "pass" if expected == 0 else "fail")
             return data
 
-    def test_task1_correct(self):
-        self.check("task1", ROOT / "testdata/task1-good", 0)
-
-    def test_task1_rejects_duplicate_index(self):
-        data = self.check("task1", ROOT / "testdata/task1-bad", 1)
-        self.assertTrue(any(t["name"].startswith("TestCourseTwoSum") and t["status"] == "fail"
-                            for t in data["tests"]))
-
-    def test_task2_correct(self):
-        self.check("task2", ROOT / "testdata/task2-good", 0)
-
-    def test_task2_rejects_sequential_download(self):
+    def test_task1_rejects_missing_required_function(self):
         with tempfile.TemporaryDirectory() as tmp:
-            source = Path(tmp) / "solution"
-            shutil.copytree(ROOT / "testdata/task2-good", source)
-            main = source / "main.go"
-            main.write_text(main.read_text().replace("i < *workers", "i < 1"))
-            data = self.check("task2", source, 1)
-            self.assertTrue(any(t["name"].startswith("TestCourseWorkerLimit") and t["status"] == "fail"
-                                for t in data["tests"]))
+            source = Path(tmp)
+            (source / "go.mod").write_text("module student\n\ngo 1.26.4\n")
+            (source / "main.go").write_text("package main\nfunc main() {}\n")
+            self.check("task1", source, 1)
 
-    def test_task3_correct(self):
-        data = self.check("task3", ROOT / "testdata/task3-good", 0)
-        top_level = [t for t in data["tests"] if "/" not in t["name"]]
-        self.assertEqual(len(top_level), 5)
+    def test_report_reflects_check_result_for_each_basic_suite(self):
+        for task in ("task1", "task2", "task3"):
+            for action in ("pass", "fail", "skip"):
+                with self.subTest(task=task, action=action), tempfile.TemporaryDirectory() as tmp:
+                    source = Path(tmp)
+                    (source / "go.mod").write_text("module student\n")
+                    report = source / "report.json"
+                    event = json.dumps({"Action": action, "Test": "TestCourseExample"})
+                    with mock.patch.object(sys, "argv", ["check.py", task, str(source), "--report", str(report)]), \
+                            mock.patch.object(check, "evaluate", return_value=(0, event)), \
+                            mock.patch.object(check, "revision", return_value=None), \
+                            contextlib.redirect_stdout(io.StringIO()):
+                        code = check.main()
+                    expected = "pass" if action == "pass" else "fail"
+                    self.assertEqual(code, 0 if expected == "pass" else 1)
+                    self.assertEqual(json.loads(report.read_text())["status"], expected)
 
-    def test_task3_rejects_wrong_last_movie(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            source = Path(tmp) / "solution"
-            shutil.copytree(ROOT / "testdata/task3-good", source)
-            main = source / "main.go"
-            main.write_text(main.read_text().replace("last = m", "last = m; break"))
-            data = self.check("task3", source, 1)
-            self.assertTrue(any(t["name"] == "TestCourseLastMovie" and t["status"] == "fail"
-                                for t in data["tests"]))
+    def test_parse_events_retains_test_status_and_diagnostic(self):
+        output = "build diagnostic\n" + "\n".join(json.dumps(event) for event in (
+            {"Action": "output", "Test": "TestCourseExample", "Output": "wrong result\n"},
+            {"Action": "fail", "Test": "TestCourseExample", "Elapsed": 0.1}))
+        tests, log = check.parse_events(output)
+        self.assertEqual(tests, [{"name": "TestCourseExample", "status": "fail", "elapsed_seconds": 0.1}])
+        self.assertIn("wrong result", log)
+        self.assertIn("build diagnostic", log)
 
     def test_unsupported_task_rejected(self):
         result = subprocess.run(["python3", str(ROOT / "scripts/check.py"), "task11", "."],

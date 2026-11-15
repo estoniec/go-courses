@@ -121,7 +121,7 @@ class DiscoveryTests(unittest.TestCase):
         env = dict(os.environ, GITHUB_HEAD_REF="task1", GITHUB_REF_NAME="task1",
                    COURSE_PR_TITLE="Movie service")
         result = subprocess.run(["python3", str(ROOT / "scripts/ci.py"),
-                                 "--repo", str(ROOT / "testdata/task1-good"),
+                                 "--repo", str(self.repo),
                                  "--report", str(report)], env=env,
                                 capture_output=True, text=True, timeout=30)
         self.assertNotEqual(result.returncode, 0)
@@ -129,13 +129,15 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(data["pr_title"], "Movie service")
         self.assertIn("по заголовку PR", data["log"])
 
-    def test_automatic_grading_end_to_end(self):
+    def test_automatic_grading_reaches_selected_checker(self):
+        self.module()
         result = subprocess.run(["python3", str(ROOT / "scripts/ci.py"),
-                                 "--repo", str(ROOT / "testdata/task1-good"), "--pr-title", "ДЗ 1"],
+                                 "--repo", str(self.repo), "--pr-title", "ДЗ 1"],
                                 env=dict(os.environ, GITHUB_HEAD_REF="task3", GITHUB_REF_NAME="task3"),
                                 capture_output=True, text=True, timeout=180)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("PASS: task1", result.stdout)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ДЗ: task1", result.stdout)
+        self.assertIn("FAIL: task1", result.stdout)
 
 
 if __name__ == "__main__":

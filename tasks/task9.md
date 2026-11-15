@@ -1,32 +1,50 @@
 ### Docker + Kubernetes
 
-Нужно подготовить проект к запуску в контейнерах.
+Нужно подготовить проект из ДЗ 8 к запуску в контейнерах. Сохраняются два сервиса, обмен через Kafka, хранение в PostgreSQL, поиск через Redis и HTML-страница поиска.
 
-Docker:
+### Данные и API
+
+Фильм-стенд [kinosearch](https://github.com/vacmannnn/kinosearch) возвращает по `GET /{id}/info.0.json` только четыре поля:
+
+```json
+{"id": 1, "title": "Solaris", "year": 1972, "director": "Andrei Tarkovsky"}
+```
+
+`id` и `year` — числа, `title` и `director` — строки. Для отсутствующего фильма стенд возвращает 404. Описание, актёры и жанры не требуются; получать их из других источников не нужно. Поиск остаётся по словам из названия и режиссёра.
+
+Пользовательские HTTP/gRPC API сохраняют контракт предыдущих ДЗ. Для HTTP обязательны `/load-movies?from=N&to=M` (JSON-массив), `/last-movie` (JSON-объект) и `/search?q=...` (JSON-массив, при отсутствии совпадений — `[]`). Все фильмы содержат `id`, `title`, `year`, `director`.
+
+### Docker Compose
 
 - написать `Dockerfile` для `catalog-service`;
 - написать `Dockerfile` для `downloader-service`;
-- добавить `docker-compose.yml`, который поднимает оба сервиса и все зависимости: PostgreSQL, Redis, Kafka;
-- сервис должен запускаться одной командой, например `docker compose up`.
+- добавить Compose-файл, который поднимает оба сервиса и все зависимости: PostgreSQL, Redis, Kafka;
+- весь проект должен собираться и запускаться одной командой `docker compose up --build` без ручной подготовки БД и топиков.
 
-`downloader-service` должен читать `MOVIE_BASE_URL` из окружения. Docker Compose должен позволять переопределить эту переменную для `downloader-service`; базовый URL фильм-стенда нельзя жёстко зашивать в код или Docker-образ. HTTP-порт `catalog-service` должен быть опубликован через Compose.
+Положите один файл `compose.yaml`, `compose.yml`, `docker-compose.yml` или `docker-compose.yaml` в корень решения ДЗ 9. Имена сервисов приложения должны содержать `catalog` и `downloader`; оба образа собираются через `build`. HTTP-порт `catalog-service` должен быть опубликован через Compose.
 
-Kubernetes:
+Сохраняются переменные окружения из предыдущих ДЗ: `MOVIE_BASE_URL`, `HTTP_ADDR`, `DATABASE_URL`, `REDIS_ADDR`, `KAFKA_BROKERS`. Внутри Compose используйте имена сервисов для адресов PostgreSQL, Redis и Kafka. `downloader-service` должен использовать переданный `MOVIE_BASE_URL`; базовый URL нельзя жёстко зашивать в код или Docker-образ. Приложения запускаются без обязательных CLI-аргументов и автоматически готовят схему БД до синхронизации.
+
+### Kubernetes
 
 - добавить манифесты для `catalog-service` и `downloader-service`;
 - для каждого сервиса нужны `Deployment` и `Service`;
 - конфигурацию вынести в `ConfigMap`, чувствительные значения — в `Secret`;
 - добавить readiness/liveness probes для сервисов;
 - указать базовые resource requests/limits;
-- запустить `catalog-service` в нескольких репликах и проверить, что запросы продолжают работать.
+- указать для `catalog-service` `replicas: 2` или больше, запустить проект в локальном кластере и проверить обычный запрос к API.
+
+Названия Deployment должны содержать `catalog` и `downloader`. Селекторы Deployment и Service должны выбирать соответствующие pod'ы. В requests и limits задайте CPU и память. Манифесты можно хранить в каталоге `k8s/` в виде обычных YAML-файлов.
 
 PostgreSQL, Redis и Kafka можно поднять в Kubernetes простыми манифестами или использовать готовые образы без сложной production-настройки.
 
 Helm, Ingress, autoscaling и production-grade настройка Kafka/PostgreSQL в этом ДЗ не требуются.
 
+В README опишите команды запуска и остановки Compose, URL API и HTML-поиска, переменные окружения, применение Kubernetes-манифестов и изменение числа реплик. Достаточно показать успешный обычный запрос при двух репликах; тестировать отказ pod'ов, нагрузку и восстановление кластера не нужно.
+
 ### Критерии оценивания
 
-6 баллов — Добавлены рабочие Dockerfile для обоих сервисов. Docker Compose одной командой поднимает catalog-service, downloader-service, PostgreSQL, Redis и Kafka; HTTP-порт опубликован, MOVIE_BASE_URL для downloader-service можно переопределить через окружение. В Kubernetes для обоих сервисов есть Deployment и Service, используются ConfigMap и Secret, настроены readiness/liveness probes и resource requests/limits. Проверена работа API при нескольких репликах catalog-service. В README описаны запуск через Compose и Kubernetes и изменение числа реплик.
+6 баллов — Добавлены рабочие Dockerfile для обоих сервисов. Docker Compose одной командой поднимает catalog-service, downloader-service, PostgreSQL, Redis и Kafka; HTTP-порт опубликован, MOVIE_BASE_URL для downloader-service можно переопределить через окружение. Сохранены API и поиск по названию и режиссёру на данных из четырёх полей. В Kubernetes для обоих сервисов есть Deployment и Service, используются ConfigMap и Secret, настроены readiness/liveness probes и resource requests/limits. Проверен обычный запрос к API при нескольких репликах catalog-service. В README описаны запуск через Compose и Kubernetes и изменение числа реплик.
 
 5 баллов — Запуск через Compose и Kubernetes работает, все обязательные манифесты и настройки добавлены, несколько реплик обслуживают запросы. Есть небольшой недочёт в документации, например, не приведена команда изменения числа реплик.
 

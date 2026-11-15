@@ -19,7 +19,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = Path(__file__).resolve().parent.parent
 MOVIES = json.loads((ROOT / "fixtures/movies.json").read_text())
-TASK5_MOVIES = [{field: movie[field] for field in ("id", "title", "year", "director")} for movie in MOVIES]
 
 
 def require(condition, message):
@@ -385,22 +384,47 @@ def task5_incremental_sync(apps, upstream, docker, expected):
             "last-movie did not advance to the newly synchronized film")
 
 
+def expect_search(results, expected):
+    require(sorted(movie.get("id", -1) for movie in results) == sorted(movie["id"] for movie in expected),
+            "Search returned incorrect movie ids: " + repr(results))
+    by_id = {movie["id"]: movie for movie in expected}
+    for movie in results:
+        for field in ("id", "title", "year", "director"):
+            value = movie.get(field)
+            want = by_id[movie["id"]][field]
+            require(type(value) is type(want) and value == want,
+                    "Search returned incorrect {} for movie {}: {}".format(field, movie["id"], repr(value)))
+
+
 def search(base):
     # One word at a time: does not assume AND/OR semantics or language stemming.
-    for term, movie_id in (("Solaris", 1), ("psychologist", 1), ("Tarkovsky", 1), ("Banionis", 1), ("animation", 2)):
+    for term, movie_id in (("Solaris", 1), ("Tarkovsky", 1), ("Spirited", 2), ("Miyazaki", 2), ("Anderson", 3)):
         results = films(base, "/search?" + urllib.parse.urlencode({"q": term}))
-        require(movie_id in [movie.get("id") for movie in results], "Search for {!r} did not return movie {}".format(term, movie_id))
+        expect_search(results, [MOVIES[movie_id - 1]])
     require(films(base, "/search?q=unmatched-course-query-7291") == [], "Unknown term should return an empty array")
 
 
+def clear_search_cache(docker):
+    for key, ttl in docker.redis_ttls().items():
+        if ttl >= 0:
+            docker.exec(docker.redis, "redis-cli", "DEL", key)
+
+
 def cache(base, docker):
+    # Remove existing responses, preserving the persistent inverted index. Otherwise
+    # an unrelated expiring key can make a missing/wrong cache TTL look correct.
+    clear_search_cache(docker)
     before = docker.redis_ttls()
     first = films(base, "/search?q=Solaris")
+    expect_search(first, [MOVIES[0]])
+    ttls = docker.redis_ttls()
+    created = {key: ttl for key, ttl in ttls.items() if key not in before}
+    require(created and any(3500 <= ttl <= 3600 for ttl in created.values()),
+            "Search must create a Redis cache entry with a one-hour TTL: " + repr(created))
+    require(all(3500 <= ttl <= 3600 for ttl in created.values() if ttl >= 0),
+            "Search created a cache entry with an incorrect TTL: " + repr(created))
     second = films(base, "/search?q=Solaris")
     require(first == second, "Repeated search returned different results")
-    ttls = docker.redis_ttls()
-    require(any(3500 <= ttl <= 3600 for ttl in ttls.values()), "No Redis cache entry with a one-hour TTL: " + repr(ttls))
-    require(ttls or before, "Redis is empty")
     # The cached response must remain available while PostgreSQL is temporarily stopped.
     try:
         run(["docker", "stop", docker.pg], timeout=30)
@@ -408,6 +432,65 @@ def cache(base, docker):
     finally:
         run(["docker", "start", docker.pg], timeout=30)
         eventually(lambda: docker.exec(docker.pg, "pg_isready", "-U", "course", "-d", "movies"), timeout=30)
+
+
+def task6_search_contract(base):
+    for query in ("", "?q=", "?q=%20%20%20"):
+        status, _, body = http(base + "/search" + query)
+        require(status == 400 and body.strip(), "Missing/blank q must return HTTP 400 with an explanation")
+    for term in ("solaris", "SOLARIS", "  Solaris  "):
+        results = films(base, "/search?" + urllib.parse.urlencode({"q": term}))
+        expect_search(results, [MOVIES[0]])
+
+
+def task6_index(apps, docker):
+    require(any(ttl == -1 for ttl in docker.redis_ttls().values()),
+            "Startup must build a persistent inverted index in Redis before the first search")
+    # This is a dedicated temporary Redis instance. A cold query without its
+    # index must not silently fall back to SQL or an in-memory catalog scan.
+    docker.exec(docker.redis, "redis-cli", "FLUSHDB")
+    try:
+        status, _, body = http(apps.base + "/search?q=Tarkovsky")
+        if status == 200:
+            results = json.loads(body)
+            require(isinstance(results, list), "Search must return a JSON array")
+            if results:
+                # Recovery on demand is valid, but SQL-only search plus a response
+                # cache is not an inverted index.
+                require(any(ttl == -1 for ttl in docker.redis_ttls().values()),
+                        "Search still found movies without the Redis index (SQL/in-memory fallback)")
+    finally:
+        apps.stop()
+        apps.start()
+    require(any(ttl == -1 for ttl in docker.redis_ttls().values()),
+            "Restart must rebuild the Redis index even when PostgreSQL is already populated")
+    results = films(apps.base, "/search?q=Solaris")
+    expect_search(results, [MOVIES[0]])
+
+
+def task6_database_source(apps, docker):
+    clear_search_cache(docker)
+    original = MOVIES[0]["title"]
+    replacement = original + " (changed in PostgreSQL)"
+    quote = lambda value: "'" + value.replace("'", "''") + "'"
+    tables = docker.movie_tables()
+    try:
+        changed = 0
+        for table in tables:
+            quoted = '"' + table.replace('"', '""') + '"'
+            changed += int(docker.sql("WITH changed AS (UPDATE " + quoted + " SET title=" + quote(replacement) +
+                                     " WHERE title=" + quote(original) + " RETURNING 1) SELECT count(*) FROM changed"))
+        require(changed > 0, "Could not update fixture movie in PostgreSQL")
+        # Response caches were removed above; the index itself remains intact.
+        results = films(apps.base, "/search?q=Tarkovsky")
+        require(len(results) == 1 and results[0].get("id") == 1 and results[0].get("title") == replacement,
+                "Search must load the indexed ids from PostgreSQL, not return stale in-memory/Redis movie data")
+        expect_search(results, [dict(MOVIES[0], title=replacement)])
+    finally:
+        for table in tables:
+            quoted = '"' + table.replace('"', '""') + '"'
+            docker.sql("UPDATE " + quoted + " SET title=" + quote(original) + " WHERE title=" + quote(replacement))
+        clear_search_cache(docker)
 
 
 class FormParser(html.parser.HTMLParser):
@@ -431,17 +514,8 @@ class FormParser(html.parser.HTMLParser):
 
 
 def web_ui(base):
-    status, headers, body = http(base + "/")
-    require(status == 200 and "text/html" in headers.get("Content-Type", ""), "GET / must serve the HTML search form")
-    parser = FormParser()
-    parser.feed(body)
-    require(parser.action is not None and parser.query, "Expected a form with input name=q")
-    target = urllib.parse.urljoin(base + "/", parser.action)
-    require(urllib.parse.urlsplit(target).netloc == urllib.parse.urlsplit(base).netloc, "Form must submit to this service")
-    target += ("&" if "?" in target else "?") + "q=Solaris"
-    status, headers, body = http(target)
-    require(status == 200 and "text/html" in headers.get("Content-Type", "") and "Solaris" in body,
-            "HTML result page must contain the found movie")
+    from task78 import html_search
+    return html_search(base)
 
 
 def student_tests(modules, env, coverage=False):
@@ -584,23 +658,8 @@ def observability_config(source, config):
 
 
 def metrics(base, logs):
-    status, _, body = http(base + "/metrics")
-    require(status == 200, "GET /metrics must return 200")
-    samples = re.findall(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{[^\n]*\})?\s+[-+0-9.eE]+(?:\s+[0-9]+)?$", body, re.M)
-    require(samples and "# TYPE " in body, "Expected Prometheus text exposition with numeric samples and metric types")
-    names = " ".join(samples).lower()
-    for category in (("http", "grpc"), ("search", "movie"), ("redis",), ("kafka",), ("postgres", "pg_", "database")):
-        require(any(word in names for word in category), "No metric family for " + "/".join(category))
-    events = []
-    for line in logs.splitlines():
-        try:
-            event = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(event, dict):
-            events.append(event)
-    require(any(event.get("level") and event.get("msg") for event in events), "No structured slog JSON records")
-    require(any(re.search(r"request[_-]?id|correlation[_-]?id", json.dumps(event), re.I) for event in events), "No request/correlation id in structured logs")
+    from task10 import metrics as check_metrics
+    return check_metrics(base, logs)
 
 
 def evaluate(task, source):
@@ -646,7 +705,7 @@ def evaluate(task, source):
                 cleanup.callback(docker.close)
                 case("TestCourseDependencies", lambda: docker.services(number))
                 env.update(docker.env)
-                upstream = Upstream(TASK5_MOVIES if number == 5 else None)
+                upstream = Upstream()
                 cleanup.callback(upstream.close)
                 apps = Apps(workspace, modules, number, env, upstream)
                 cleanup.callback(apps.close)
@@ -654,11 +713,7 @@ def evaluate(task, source):
                 def migrations():
                     files = list(workspace.rglob("*.sql"))
                     require(any("create table" in file.read_text().lower() for file in files), "Expected SQL schema/migration files with CREATE TABLE")
-                    if number == 5:
-                        return
-                    names = docker.sql("SELECT string_agg(table_name || '.' || column_name, ',') FROM information_schema.columns WHERE table_schema='public'").lower()
-                    require("actor" in names and "genre" in names, "Database schema must store actors and genres (tables or columns)")
-                case("TestCourseMigrations" if number == 5 else "TestCourseMigrationsAndRelations", migrations)
+                case("TestCourseMigrations", migrations)
                 case("TestCoursePostgresPersistence", lambda: require(docker.stored_movies() == 3, "Expected exactly three fixture movies in PostgreSQL"))
                 def offline_reads():
                     upstream.offline = True
@@ -670,32 +725,45 @@ def evaluate(task, source):
                     with upstream.lock:
                         require(len(upstream.requests) == before, "User API called external upstream instead of PostgreSQL")
                     upstream.offline = False
-                case("TestCourseAPIReadsDatabase", offline_reads)
+                if number <= 6:
+                    case("TestCourseAPIReadsDatabase", offline_reads)
+                if number == 6:
+                    case("TestCourseRedisIndexAndRebuild", lambda: task6_index(apps, docker))
+                    case("TestCourseSearchReadsPostgres", lambda: task6_database_source(apps, docker))
+                    case("TestCourseSearchContract", lambda: task6_search_contract(apps.base))
                 if number >= 6:
-                    case("TestCourseSearchFields", lambda: search(apps.base))
-                    case("TestCourseRedisTTL", lambda: cache(apps.base, docker))
+                    if number == 6:
+                        case("TestCourseSearchFields", lambda: search(apps.base))
+                        case("TestCourseRedisTTL", lambda: cache(apps.base, docker))
+                    else:
+                        from task9 import compose_api as catalog_api
+                        from task78 import basic_cache
+                        case("TestCourseCatalogAPI", lambda: catalog_api(apps.base))
+                        case("TestCourseRedisCache", lambda: basic_cache(apps.base, docker))
                 if number >= 7:
-                    def kafka_redelivery():
-                        payload = docker.rpk("topic", "consume", "movie_downloaded", "-n", "1", "-o", "start", "-f", "%v")
-                        require(payload.strip(), "No movie event in movie_downloaded")
-                        docker.rpk("topic", "produce", "movie_downloaded", input=payload.rstrip("\n") + "\n")
-                        time.sleep(1)
-                        expect_catalog(apps.base)
-                        require(docker.stored_movies() == 3, "Kafka redelivery created duplicate movies")
-                        require(docker.rpk("topic", "consume", "movie_download_tasks", "-n", "1", "-o", "start", "-f", "%v").strip(), "No download task in Kafka")
-                    case("TestCourseKafkaFlowAndRedelivery", kafka_redelivery)
+                    from task78 import kafka_flow
+                    case("TestCourseKafkaFlow", lambda: kafka_flow(docker))
                 def restart():
                     apps.stop()
                     apps.start()
                     require(docker.stored_movies() == 3, "Restart/repeated sync created duplicate movies")
                 case("TestCourseIdempotentRestart", restart)
-                if number == 5:
+                if number in (5, 6):
                     case("TestCourseTask5HTTPContract", lambda: task5_http_contract(apps.base))
                     case("TestCourseDatabaseSourceOfTruth", lambda: task5_database_source(apps, upstream, docker))
-                    extended = TASK5_MOVIES + [{"id": 4, "title": "Additional Course Movie", "year": 2020,
+                    extended = MOVIES + [{"id": 4, "title": "Additional Course Movie", "year": 2020,
                                                 "director": "Course Director"}]
+                    if number == 6:
+                        case("TestCourseCacheBeforeIncrementalSync",
+                             lambda: expect_search(films(apps.base, "/search?q=Additional"), []))
                     case("TestCourseIncrementalSync", lambda: task5_incremental_sync(apps, upstream, docker, extended))
                     case("TestCourseIncrementalSyncIdempotence", lambda: task5_incremental_sync(apps, upstream, docker, extended))
+                    if number == 6:
+                        def new_movie_search():
+                            for term, movie_id in (("Additional", 4), ("Director", 4)):
+                                results = films(apps.base, "/search?" + urllib.parse.urlencode({"q": term}))
+                                expect_search(results, [extended[movie_id - 1]])
+                        case("TestCourseIncrementalSearchIndex", new_movie_search)
                 if number == 8:
                     case("TestCourseHTMLSearch", lambda: web_ui(apps.base))
                 case("TestCourseStudentCoverage" if number == 8 else "TestCourseStudentTests",
@@ -713,7 +781,8 @@ def evaluate(task, source):
                 if number == 10:
                     case("TestCourseObservabilityConfig", lambda: observability_config(workspace, compose.config))
                 case("TestCourseComposeBuildAndStartup", compose.start)
-                case("TestCourseComposeSearch", lambda: search(compose.base))
+                from task9 import compose_api
+                case("TestCourseComposeAPI", lambda: compose_api(compose.base))
                 if number == 10:
                     case("TestCourseMetricsAndLogs", lambda: metrics(compose.base, compose.logs()))
                 case("TestCourseStudentTests", lambda: student_tests(modules, env))
