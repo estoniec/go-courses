@@ -199,8 +199,10 @@ class Docker:
         return run(["docker", "exec", "-i", container] + list(args), input=input, timeout=30)
 
     def services(self, number):
+        # Task 6 stops and starts PostgreSQL while the app retains its DSN.
         self.pg, port = self.start("postgres:16-alpine", 5432,
-                                   {"POSTGRES_DB": "movies", "POSTGRES_USER": "course", "POSTGRES_PASSWORD": "course"})
+                                   {"POSTGRES_DB": "movies", "POSTGRES_USER": "course", "POSTGRES_PASSWORD": "course"},
+                                   fixed_port=free_port() if number == 6 else None)
         eventually(lambda: self.exec(self.pg, "pg_isready", "-U", "course", "-d", "movies"), timeout=60)
         self.env["DATABASE_URL"] = "postgres://course:course@127.0.0.1:{}/movies?sslmode=disable".format(port)
         if number >= 6:

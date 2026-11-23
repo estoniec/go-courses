@@ -56,6 +56,18 @@ class SearchTests(unittest.TestCase):
 
 
 class CacheTests(unittest.TestCase):
+    def test_postgres_uses_an_explicit_host_port(self):
+        with mock.patch.object(advanced, "run") as run, \
+                mock.patch.object(advanced, "free_port", return_value=32768), \
+                mock.patch.object(advanced, "eventually"):
+            run.side_effect = ["", "", "127.0.0.1:32768\n", "", "127.0.0.1:32769\n"]
+            docker = advanced.Docker()
+            docker.services(6)
+
+        postgres_run = run.call_args_list[1].args[0]
+        self.assertEqual(postgres_run[postgres_run.index("-p") + 1], "127.0.0.1:32768:5432")
+        self.assertEqual(docker.env["DATABASE_URL"], "postgres://course:course@127.0.0.1:32768/movies?sslmode=disable")
+
     def check_cache(self, ttl=3600, cached=None, wrong_first=False):
         docker = mock.Mock(pg="postgres", redis="redis")
         # Unrelated expiring keys must not count as evidence of response caching.
