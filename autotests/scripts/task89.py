@@ -1,4 +1,4 @@
-"""Small happy-path checks for the Kafka and HTML homework steps."""
+"""Small happy-path checks for the HTML and Kafka homework steps."""
 import urllib.parse
 
 

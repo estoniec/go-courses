@@ -9,7 +9,7 @@ import urllib.parse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import advanced
-from task9 import compose_api
+from catalog_http import catalog_api
 
 
 class ComposeAPITests(unittest.TestCase):
@@ -28,7 +28,7 @@ class ComposeAPITests(unittest.TestCase):
     def test_default_api_with_four_field_movies(self):
         self.assertTrue(all(set(movie) == {"id", "title", "year", "director"} for movie in advanced.MOVIES))
         with mock.patch.object(advanced, "http", side_effect=self.response) as http:
-            compose_api("http://catalog")
+            catalog_api("http://catalog")
         self.assertTrue(any(call.args[0].endswith("/last-movie") for call in http.call_args_list))
 
     def test_last_movie_must_have_the_current_four_fields(self):
@@ -39,46 +39,62 @@ class ComposeAPITests(unittest.TestCase):
                 return self.response(url)
             with self.subTest(last=last), mock.patch.object(advanced, "http", side_effect=response):
                 with self.assertRaises(AssertionError):
-                    compose_api("http://catalog")
+                    catalog_api("http://catalog")
 
     def test_last_movie_http_failure_is_reported(self):
         with mock.patch.object(advanced, "expect_catalog"), \
                 mock.patch.object(advanced, "http", return_value=(500, {}, "database error")):
             with self.assertRaisesRegex(AssertionError, "HTTP 200"):
-                compose_api("http://catalog")
+                catalog_api("http://catalog")
 
-    def test_compose_uses_builds_and_overrides_movie_base_url(self):
+    def compose(self, services, with_kafka):
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp)
             (source / "compose.yaml").write_text("services: {}\n")
-            config = {"services": {"catalog-service": {"build": ".", "ports": [{"target": 8080}]},
-                                    "downloader-service": {"build": "."},
-                                    "postgres": {"image": "postgres:16-alpine"},
-                                    "redis": {"image": "redis:7-alpine"},
-                                    "broker": {"image": "redpandadata/redpanda"}}}
-            with mock.patch.object(advanced, "run", side_effect=["Docker", json.dumps(config)]):
-                compose = advanced.Compose(source, mock.Mock(port=12345))
-            override = json.loads(compose.override.read_text())["services"]["downloader-service"]
-            self.assertEqual(override["environment"]["MOVIE_BASE_URL"], "http://host.docker.internal:12345")
+            with mock.patch.object(advanced, "run", side_effect=["Docker", json.dumps({"services": services})]):
+                compose = advanced.Compose(source, mock.Mock(port=12345), with_kafka=with_kafka)
+            return json.loads(compose.override.read_text())["services"]
+
+    def services(self):
+        return {"catalog-service": {"build": ".", "ports": [{"target": 8080}]},
+                "postgres": {"image": "postgres:16-alpine"},
+                "redis": {"image": "redis:7-alpine"}}
+
+    def test_task7_compose_passes_fixture_url_to_catalog(self):
+        override = self.compose(self.services(), with_kafka=False)
+        self.assertEqual(set(override), {"catalog-service"})
+        self.assertEqual(override["catalog-service"]["environment"]["MOVIE_BASE_URL"],
+                         "http://host.docker.internal:12345")
+
+    def test_task10_compose_passes_fixture_url_to_downloader(self):
+        services = dict(self.services(), downloader={"build": "."}, broker={"image": "redpandadata/redpanda"})
+        override = self.compose(services, with_kafka=True)
+        self.assertEqual(set(override), {"downloader"})
+        self.assertEqual(override["downloader"]["environment"]["MOVIE_BASE_URL"],
+                         "http://host.docker.internal:12345")
+
+    def test_task10_still_requires_broker(self):
+        services = dict(self.services(), downloader={"build": "."})
+        with self.assertRaisesRegex(AssertionError, "Compose lacks Kafka"):
+            self.compose(services, with_kafka=True)
 
 
 class KubernetesBasicTests(unittest.TestCase):
     def manifests(self):
-        documents = [{"kind": "ConfigMap"}, {"kind": "Secret"}]
-        for role in ("catalog", "downloader"):
-            labels = {"app": role}
-            documents.extend([
-                {"kind": "Deployment", "metadata": {"name": role}, "spec": {
-                    "replicas": 2 if role == "catalog" else 1,
-                    "selector": {"matchLabels": labels},
-                    "template": {"metadata": {"labels": labels}, "spec": {"containers": [{
-                        "name": role, "readinessProbe": {"tcpSocket": {"port": 8080}},
-                        "livenessProbe": {"tcpSocket": {"port": 8080}}, "resources": {
-                            "requests": {"cpu": "100m", "memory": "64Mi"},
-                            "limits": {"cpu": "1", "memory": "128Mi"}}}]}}}},
-                {"kind": "Service", "spec": {"selector": labels}},
-            ])
-        return documents
+        labels = {"app": "catalog"}
+        return [
+            {"kind": "ConfigMap"},
+            {"kind": "Secret"},
+            {"kind": "Deployment", "metadata": {"name": "catalog"}, "spec": {
+                "replicas": 2,
+                "selector": {"matchLabels": labels},
+                "template": {"metadata": {"labels": labels}, "spec": {"containers": [{
+                    "name": "catalog", "readinessProbe": {"tcpSocket": {"port": 8080}},
+                    "livenessProbe": {"tcpSocket": {"port": 8080}}, "resources": {
+                        "requests": {"cpu": "100m", "memory": "64Mi"},
+                        "limits": {"cpu": "1", "memory": "128Mi"}}}]}}}},
+            {"kind": "Service", "spec": {"selector": labels}},
+        ]
 
     def check(self, documents):
         with tempfile.TemporaryDirectory() as tmp:
@@ -86,7 +102,7 @@ class KubernetesBasicTests(unittest.TestCase):
             (source / "k8s.yaml").write_text(json.dumps({"kind": "List", "items": documents}))
             advanced.kubernetes(source)
 
-    def test_basic_two_service_manifests(self):
+    def test_accepts_only_catalog_app(self):
         self.check(self.manifests())
 
     def test_service_must_select_the_application_pods(self):
@@ -95,10 +111,10 @@ class KubernetesBasicTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "Service selecting catalog"):
             self.check(documents)
 
-    def test_both_application_deployments_are_required(self):
+    def test_catalog_deployment_is_required(self):
         documents = self.manifests()
-        documents.pop(4)
-        with self.assertRaisesRegex(AssertionError, "Deployment for downloader"):
+        documents[2]["metadata"]["name"] = "postgres"
+        with self.assertRaisesRegex(AssertionError, "Deployment for catalog"):
             self.check(documents)
 
 
