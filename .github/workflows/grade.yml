@@ -17,7 +17,7 @@ on:
         type: choice
         options: ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10']
       solution-dir:
-        description: Directory containing the student go.mod
+        description: Homework directory, relative to the student repository
         default: auto
         type: string
       package-dir:

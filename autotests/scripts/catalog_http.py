@@ -1,8 +1,8 @@
-"""Basic HTTP acceptance scenario for the student's Compose deployment."""
+"""Basic HTTP acceptance scenario for the catalog service."""
 import json
 
 
-def compose_api(base):
+def catalog_api(base):
     from advanced import MOVIES, expect_catalog, expect_search, http, require, search
 
     expect_catalog(base)

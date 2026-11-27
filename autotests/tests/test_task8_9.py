@@ -1,4 +1,4 @@
-"""Basic regression checks for homework 7–8; no student implementation fixtures."""
+"""Basic regression checks for homework 8–9; no student implementation fixtures."""
 from pathlib import Path
 import sys
 import tempfile
@@ -7,14 +7,14 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import advanced
-import task78
+import task89
 
 
 class KafkaFlowTests(unittest.TestCase):
     def test_messages_in_both_topics(self):
         docker = mock.Mock()
         docker.rpk.side_effect = ['{"last_id":0}', '{"id":1,"title":"Solaris","year":1972,"director":"Andrei Tarkovsky"}']
-        task78.kafka_flow(docker)
+        task89.kafka_flow(docker)
         self.assertEqual(docker.rpk.call_args_list, [
             mock.call("topic", "consume", topic, "-n", "1", "-o", "start", "-f", "%v")
             for topic in ("movie_download_tasks", "movie_downloaded")])
@@ -24,7 +24,7 @@ class KafkaFlowTests(unittest.TestCase):
             docker = mock.Mock()
             docker.rpk.side_effect = responses
             with self.subTest(responses=responses), self.assertRaisesRegex(AssertionError, "No message"):
-                task78.kafka_flow(docker)
+                task89.kafka_flow(docker)
 
 
 class BasicCacheTests(unittest.TestCase):
@@ -32,7 +32,7 @@ class BasicCacheTests(unittest.TestCase):
         docker = mock.Mock()
         docker.redis_ttls.return_value = {"index:solaris": -1, "cache": 3600}
         with mock.patch.object(advanced, "films", return_value=[advanced.MOVIES[0]]) as films:
-            task78.basic_cache("http://catalog", docker)
+            task89.basic_cache("http://catalog", docker)
         self.assertEqual(films.call_count, 2)
         docker.exec.assert_not_called()
 
@@ -40,7 +40,7 @@ class BasicCacheTests(unittest.TestCase):
         docker = mock.Mock()
         docker.redis_ttls.return_value = {"index:solaris": -1}
         with mock.patch.object(advanced, "films", return_value=[advanced.MOVIES[0]]), self.assertRaisesRegex(AssertionError, "cache"):
-            task78.basic_cache("http://catalog", docker)
+            task89.basic_cache("http://catalog", docker)
 
 
 class HTMLSearchTests(unittest.TestCase):
@@ -50,7 +50,7 @@ class HTMLSearchTests(unittest.TestCase):
         responses = [(200, {"Content-Type": "text/html"}, self.form)] + [
             (200, {"Content-Type": "text/html; charset=utf-8"}, "<html>Solaris</html>")] * 2
         with mock.patch.object(advanced, "http", side_effect=responses) as http:
-            task78.html_search("http://catalog")
+            task89.html_search("http://catalog")
         self.assertEqual(http.call_args_list, [mock.call("http://catalog/"),
                                               mock.call("http://catalog/results?q=Solaris"),
                                               mock.call("http://catalog/results?q=Tarkovsky")])
@@ -60,13 +60,13 @@ class HTMLSearchTests(unittest.TestCase):
                      (200, {"Content-Type": "text/html"}, "Solaris"),
                      (200, {"Content-Type": "text/html"}, "Search: Tarkovsky")]
         with mock.patch.object(advanced, "http", side_effect=responses), self.assertRaisesRegex(AssertionError, "Tarkovsky"):
-            task78.html_search("http://catalog")
+            task89.html_search("http://catalog")
 
     def test_json_response_is_not_an_html_page(self):
         responses = [(200, {"Content-Type": "text/html"}, self.form),
                      (200, {"Content-Type": "application/json"}, '[{"title":"Solaris"}]')]
         with mock.patch.object(advanced, "http", side_effect=responses), self.assertRaisesRegex(AssertionError, "HTML search"):
-            task78.html_search("http://catalog")
+            task89.html_search("http://catalog")
 
 
 class CoverageTests(unittest.TestCase):

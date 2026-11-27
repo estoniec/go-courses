@@ -209,7 +209,7 @@ class Docker:
             self.redis, port = self.start("redis:7-alpine", 6379)
             eventually(lambda: self.exec(self.redis, "redis-cli", "PING").strip() == "PONG")
             self.env["REDIS_ADDR"] = "127.0.0.1:" + str(port)
-        if number >= 7:
+        if number == 9:
             port = free_port()
             self.kafka, _ = self.start("docker.redpanda.com/redpandadata/redpanda:v26.2.4", port,
                 command=["redpanda", "start", "--mode", "dev-container", "--smp", "1",
@@ -270,7 +270,7 @@ class Apps:
                         if labels and labels != {"task" + str(number)}:
                             continue
                         self.entries.append((module, directory))
-        if number < 7:
+        if number < 9:
             require(len(self.entries) == 1, "Expected one main package, found " + repr(self.entries))
             self.catalog, self.downloader = self.entries[0], None
         else:
@@ -516,7 +516,7 @@ class FormParser(html.parser.HTMLParser):
 
 
 def web_ui(base):
-    from task78 import html_search
+    from task89 import html_search
     return html_search(base)
 
 
@@ -559,24 +559,22 @@ def kubernetes(source):
     require({"Deployment", "Service", "ConfigMap", "Secret"} <= kinds, "Kubernetes: need Deployment, Service, ConfigMap and Secret")
     deployments = [d for d in documents if d.get("kind") == "Deployment"]
     services = [d for d in documents if d.get("kind") == "Service"]
-    for role in ("catalog", "downloader"):
-        matches = [d for d in deployments if role in d.get("metadata", {}).get("name", "")]
-        require(len(matches) == 1, "Expected one Kubernetes Deployment for " + role)
-        deployment = matches[0]
-        spec = deployment.get("spec", {})
-        labels = spec.get("template", {}).get("metadata", {}).get("labels", {})
-        selector = spec.get("selector", {}).get("matchLabels", {})
-        require(selector and all(labels.get(k) == v for k, v in selector.items()), "Deployment selector must match pod labels")
-        require(any(s.get("spec", {}).get("selector") and all(labels.get(k) == v for k, v in s["spec"]["selector"].items()) for s in services), "No Service selecting " + role)
-        containers = spec.get("template", {}).get("spec", {}).get("containers", [])
-        require(containers, "Deployment has no containers")
-        for container in containers:
-            require(container.get("readinessProbe") and container.get("livenessProbe"), "Missing probes for " + role)
-            for resource in ("requests", "limits"):
-                value = container.get("resources", {}).get(resource, {})
-                require(value.get("cpu") and value.get("memory"), "Missing CPU/memory " + resource)
-        if role == "catalog":
-            require(spec.get("replicas", 1) >= 2, "catalog Deployment must demonstrate multiple replicas")
+    matches = [d for d in deployments if "catalog" in d.get("metadata", {}).get("name", "")]
+    require(len(matches) == 1, "Expected one Kubernetes Deployment for catalog")
+    deployment = matches[0]
+    spec = deployment.get("spec", {})
+    labels = spec.get("template", {}).get("metadata", {}).get("labels", {})
+    selector = spec.get("selector", {}).get("matchLabels", {})
+    require(selector and all(labels.get(k) == v for k, v in selector.items()), "Deployment selector must match pod labels")
+    require(any(s.get("spec", {}).get("selector") and all(labels.get(k) == v for k, v in s["spec"]["selector"].items()) for s in services), "No Service selecting catalog")
+    containers = spec.get("template", {}).get("spec", {}).get("containers", [])
+    require(containers, "Deployment has no containers")
+    for container in containers:
+        require(container.get("readinessProbe") and container.get("livenessProbe"), "Missing probes for catalog")
+        for resource in ("requests", "limits"):
+            value = container.get("resources", {}).get(resource, {})
+            require(value.get("cpu") and value.get("memory"), "Missing CPU/memory " + resource)
+    require(spec.get("replicas", 1) >= 2, "catalog Deployment must demonstrate multiple replicas")
 
 
 def compose_file(source):
@@ -587,7 +585,7 @@ def compose_file(source):
 
 
 class Compose:
-    def __init__(self, source, upstream):
+    def __init__(self, source, upstream, *, with_kafka):
         self.source, self.project = source, "course-" + uuid.uuid4().hex[:12]
         self.file = compose_file(source)
         self.prefix = ["docker", "compose", "-p", self.project, "-f", str(self.file)]
@@ -595,7 +593,8 @@ class Compose:
         self.config = json.loads(run(self.prefix + ["config", "--format", "json"], cwd=source))
         self.roles = {}
         services = self.config.get("services", {})
-        for role in ("catalog", "downloader"):
+        roles = ("catalog", "downloader") if with_kafka else ("catalog",)
+        for role in roles:
             names = [name for name in services if role in name]
             require(len(names) == 1, "Compose must have one " + role + " service")
             self.roles[role] = names[0]
@@ -603,11 +602,14 @@ class Compose:
         images = " ".join(str(service.get("image", "")) for service in services.values()).lower()
         for dependency in ("postgres", "redis"):
             require(dependency in images, "Compose lacks " + dependency)
-        require("kafka" in images or "redpanda" in images, "Compose lacks Kafka")
+        if with_kafka:
+            require("kafka" in images or "redpanda" in images, "Compose lacks Kafka")
         # Only override the fixture URL; application ports and infrastructure come from the student's Compose.
-        override = {"services": {name: {"environment": {"MOVIE_BASE_URL": "http://host.docker.internal:" + str(upstream.port)},
-                                         "extra_hosts": ["host.docker.internal:host-gateway"]}
-                                  for name in self.roles.values()}}
+        upstream_service = self.roles["downloader" if with_kafka else "catalog"]
+        override = {"services": {upstream_service: {
+            "environment": {"MOVIE_BASE_URL": "http://host.docker.internal:" + str(upstream.port)},
+            "extra_hosts": ["host.docker.internal:host-gateway"],
+        }}}
         self.override = source / "course-compose-override.json"
         self.override.write_text(json.dumps(override))
         self.prefix += ["-f", str(self.override)]
@@ -702,7 +704,7 @@ def evaluate(task, source):
                             "Expected all five HTTP regressions to run")
                 case("TestCourseHTTPRegression", regression)
                 case("TestCourseStudentTests", lambda: student_tests(modules, env))
-            elif number <= 8:
+            elif number in (5, 6, 8, 9):
                 docker = Docker()
                 cleanup.callback(docker.close)
                 case("TestCourseDependencies", lambda: docker.services(number))
@@ -727,23 +729,21 @@ def evaluate(task, source):
                     with upstream.lock:
                         require(len(upstream.requests) == before, "User API called external upstream instead of PostgreSQL")
                     upstream.offline = False
-                if number <= 6:
+                if number != 9:
                     case("TestCourseAPIReadsDatabase", offline_reads)
                 if number == 6:
                     case("TestCourseRedisIndexAndRebuild", lambda: task6_index(apps, docker))
                     case("TestCourseSearchReadsPostgres", lambda: task6_database_source(apps, docker))
                     case("TestCourseSearchContract", lambda: task6_search_contract(apps.base))
-                if number >= 6:
-                    if number == 6:
-                        case("TestCourseSearchFields", lambda: search(apps.base))
-                        case("TestCourseRedisTTL", lambda: cache(apps.base, docker))
-                    else:
-                        from task9 import compose_api as catalog_api
-                        from task78 import basic_cache
-                        case("TestCourseCatalogAPI", lambda: catalog_api(apps.base))
-                        case("TestCourseRedisCache", lambda: basic_cache(apps.base, docker))
-                if number >= 7:
-                    from task78 import kafka_flow
+                    case("TestCourseSearchFields", lambda: search(apps.base))
+                    case("TestCourseRedisTTL", lambda: cache(apps.base, docker))
+                if number in (8, 9):
+                    from catalog_http import catalog_api
+                    from task89 import basic_cache
+                    case("TestCourseCatalogAPI", lambda: catalog_api(apps.base))
+                    case("TestCourseRedisCache", lambda: basic_cache(apps.base, docker))
+                if number == 9:
+                    from task89 import kafka_flow
                     case("TestCourseKafkaFlow", lambda: kafka_flow(docker))
                 def restart():
                     apps.stop()
@@ -766,26 +766,27 @@ def evaluate(task, source):
                                 results = films(apps.base, "/search?" + urllib.parse.urlencode({"q": term}))
                                 expect_search(results, [extended[movie_id - 1]])
                         case("TestCourseIncrementalSearchIndex", new_movie_search)
-                if number == 8:
+                if number in (8, 9):
                     case("TestCourseHTMLSearch", lambda: web_ui(apps.base))
                 case("TestCourseStudentCoverage" if number == 8 else "TestCourseStudentTests",
                      lambda: student_tests(modules, dict(env, MOVIE_BASE_URL=upstream.url), coverage=number == 8))
             else:
                 upstream = Upstream()
                 cleanup.callback(upstream.close)
-                if number == 9:
+                if number == 7:
                     case("TestCourseKubernetesManifests", lambda: kubernetes(workspace))
                 # Construction is inside a named case so configuration failures are reported.
                 stack = []
-                case("TestCourseComposeConfig", lambda: stack.append(Compose(workspace, upstream)))
+                case("TestCourseComposeConfig", lambda: stack.append(Compose(workspace, upstream, with_kafka=number == 10)))
                 compose = stack[0]
                 cleanup.callback(compose.close)
                 if number == 10:
                     case("TestCourseObservabilityConfig", lambda: observability_config(workspace, compose.config))
                 case("TestCourseComposeBuildAndStartup", compose.start)
-                from task9 import compose_api
-                case("TestCourseComposeAPI", lambda: compose_api(compose.base))
+                from catalog_http import catalog_api
+                case("TestCourseComposeAPI", lambda: catalog_api(compose.base))
                 if number == 10:
+                    case("TestCourseHTMLSearch", lambda: web_ui(compose.base))
                     case("TestCourseMetricsAndLogs", lambda: metrics(compose.base, compose.logs()))
                 case("TestCourseStudentTests", lambda: student_tests(modules, env))
     except (AssertionError, OSError, ValueError, subprocess.SubprocessError, ImportError) as exc:

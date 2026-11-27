@@ -2,7 +2,7 @@
 
 Нужно добавить observability для проекта.
 
-Требования ДЗ 9 к конфигурации контейнеров и возможности переопределить `MOVIE_BASE_URL` для `downloader-service` сохраняются.
+Возьмите два сервиса из ДЗ 9. Сохраните их запуск через Docker Compose с PostgreSQL, Redis и Kafka, а также возможность переопределить `MOVIE_BASE_URL` для `downloader-service`.
 
 ### Данные и API
 

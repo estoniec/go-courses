@@ -33,7 +33,6 @@ func TestShipping(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got, err := Shipping(tc.total)
 			if (err != nil) != tc.wantErr || got != tc.want {
 				t.Fatalf("Shipping(%d) = (%d, %v), want fee=%d err=%t",
