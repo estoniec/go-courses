@@ -9,6 +9,16 @@ import (
 	"testing"
 )
 
+func TestSimple(t *testing.T) {
+	total, err := Shipping(3001)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 0 {
+		t.Errorf("Total want: %d, got: %d", 0, total)
+	}
+}
+
 func TestShipping(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -23,6 +33,7 @@ func TestShipping(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			got, err := Shipping(tc.total)
 			if (err != nil) != tc.wantErr || got != tc.want {
 				t.Fatalf("Shipping(%d) = (%d, %v), want fee=%d err=%t",
@@ -142,3 +153,4 @@ func BenchmarkCSV(b *testing.B) {
 
 // показать для бенчмарков трассировку и pprof
 // во flamegraph увидеть сравнение двух бенчмарков
+// не забыть про benchstat
